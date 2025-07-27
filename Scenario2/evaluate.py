@@ -45,7 +45,21 @@ class G08AEvaluator:
         self.persona_performance = defaultdict(lambda: {'total_deviation': 0.0, 'count': 0}) # For persona stats
         self.correlation_data = {} # For correlation results
         self.max_rounds_observed = 0
-
+        
+        # Add persona consistency tracking
+        self.persona_consistency_results = {}
+        
+        # Define trait expectations for consistency scoring
+        self.TRAIT_EXPECTATION = {
+            "impulsive":      {"metric": "cv",      "direction": "high"},
+            "methodical":     {"metric": "cv",      "direction": "low"},
+            "risk-tolerant":  {"metric": "std_bid", "direction": "high"},
+            "logical":        {"metric": "std_bid", "direction": "low"},
+            "cautious":       {"metric": "cv",      "direction": "low"},
+            "aggressive":     {"metric": "std_bid", "direction": "high"},
+            "analytical":     {"metric": "cv",      "direction": "low"},
+            "spontaneous":    {"metric": "cv",      "direction": "high"}
+        }
 
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir, exist_ok=True)
@@ -166,6 +180,303 @@ class G08AEvaluator:
         logging.info(f"Aggregated data from {len(self.all_experiment_data)} experiments.")
         return full_df
 
+    def extract_persona_traits(self, player_name):
+        """Extract expected personality trait from player name for consistency analysis."""
+        # Direct mapping for your specific agents
+        agent_trait_mapping = {
+            "Rachel Stein": "rational",
+            "Paola Wei": "methodical", 
+            "Roxanne Gray": "impulsive",
+            "Selina Rhodes": "aggressive",
+            "Graham Wood": "analytical",
+            "Robbie Cruz": "risk-tolerant",
+            "Rachel Stein Copy": "rational",
+            "Paola Wei Copy": "methodical", 
+            "Roxanne Copy": "impulsive",
+            "Selina Rhodes Copy": "aggressive",
+            "Graham Wood Copy": "analytical",
+            "Robbie Cruz Copy": "risk-tolerant"
+        }
+        
+        # First try direct mapping
+        if player_name in agent_trait_mapping:
+            return agent_trait_mapping[player_name]
+        
+        # Fallback to keyword matching for any other agents
+        name_lower = player_name.replace('_', ' ').lower()
+        
+        trait_keywords = {
+            "rational": ["rational", "logical"],
+            "methodical": ["methodical", "systematic", "organized", "persistent", "analyst"],
+            "impulsive": ["impulsive", "hasty", "rash", "random", "picker"],
+            "aggressive": ["aggressive", "competitive", "assertive", "empath", "social"],
+            "analytical": ["analytical", "thoughtful", "deliberate", "game", "theorist"],
+            "risk-tolerant": ["risk", "bold", "daring", "taker"],
+            "cautious": ["cautious", "careful", "conservative"],
+            "spontaneous": ["spontaneous", "unpredictable", "erratic"]
+        }
+        
+        for trait, keywords in trait_keywords.items():
+            if any(keyword in name_lower for keyword in keywords):
+                return trait
+        
+        return None  # No trait identified
+
+    def calculate_persona_consistency(self, full_df):
+        """Calculate persona consistency metrics and scores."""
+        # Update trait expectations to match your agents
+        self.TRAIT_EXPECTATION = {
+            "rational":       {"metric": "cv",      "direction": "low"},    # Rachel Stein
+            "methodical":     {"metric": "cv",      "direction": "low"},    # Paola Wei  
+            "impulsive":      {"metric": "cv",      "direction": "high"},   # Roxanne Gray
+            "aggressive":     {"metric": "std_bid", "direction": "high"},   # Selina Rhodes
+            "analytical":     {"metric": "cv",      "direction": "low"},    # Graham Wood
+            "risk-tolerant":  {"metric": "std_bid", "direction": "high"},   # Robbie Cruz
+            # Keep existing fallback traits
+            "logical":        {"metric": "std_bid", "direction": "low"},
+            "cautious":       {"metric": "cv",      "direction": "low"},
+            "spontaneous":    {"metric": "cv",      "direction": "high"}
+        }
+        
+        # Calculate basic consistency metrics with proper CV guard
+        eps = 1e-6
+        consistency_df = full_df.groupby(['player']).agg(
+            mean_bid=('bid', 'mean'),
+            std_bid=('bid', 'std'),
+            cv=('bid', lambda x: x.std()/(abs(x.mean()) + eps) if abs(x.mean()) > eps else np.nan),
+            round_count=('bid', 'count')
+        ).reset_index()
+        
+        # Extract persona traits and score consistency
+        persona_scores = {}
+        trait_distribution = {}
+        raw_scores = []  # For z-score normalization
+        
+        for _, row in consistency_df.iterrows():
+            player = row['player']
+            trait = self.extract_persona_traits(player)
+            
+            if trait:
+                trait_distribution[trait] = trait_distribution.get(trait, 0) + 1
+                
+                if trait in self.TRAIT_EXPECTATION:
+                    metric_name = self.TRAIT_EXPECTATION[trait]["metric"]
+                    direction = self.TRAIT_EXPECTATION[trait]["direction"]
+                    metric_value = row[metric_name]
+                    
+                    if not np.isnan(metric_value):
+                        # Score: higher = more consistent with expected trait
+                        score = metric_value if direction == "high" else -metric_value
+                        persona_scores[player] = {
+                            'trait': trait,
+                            'metric': metric_name,
+                            'direction': direction,  # ADD THIS LINE - store direction for reporting
+                            'value': metric_value,
+                            'score': score,
+                            'rounds': int(row['round_count'])
+                        }
+                        raw_scores.append(score)
+        
+        # Z-score normalization for fair comparison
+        if raw_scores and len(raw_scores) > 1:
+            mean_score = np.mean(raw_scores)
+            std_score = np.std(raw_scores, ddof=0)
+            if std_score > eps:  # Avoid division by zero
+                for player, data in persona_scores.items():
+                    data['z_score'] = (data['score'] - mean_score) / std_score
+            else:
+                for player, data in persona_scores.items():
+                    data['z_score'] = 0.0
+        else:
+            for player, data in persona_scores.items():
+                data['z_score'] = 0.0
+        
+        self.persona_consistency_results = {
+            'individual_scores': persona_scores,
+            'trait_distribution': trait_distribution,
+            'consistency_df': consistency_df
+        }
+        
+        # Add summary stats with z-scores
+        if persona_scores:
+            scores_list = [data['score'] for data in persona_scores.values()]
+            z_scores_list = [data['z_score'] for data in persona_scores.values()]
+            self.summary_stats["persona_consistency_mean"] = np.mean(scores_list)
+            self.summary_stats["persona_consistency_std"] = np.std(scores_list)
+            self.summary_stats["persona_z_score_mean"] = np.mean(z_scores_list)
+            self.summary_stats["persona_z_score_std"] = np.std(z_scores_list)
+            self.summary_stats["personas_analyzed"] = len(persona_scores)
+        
+        logging.info(f"Analyzed consistency for {len(persona_scores)} personas across {len(trait_distribution)} trait types.")
+
+    # Add this new method for cleaner reporting
+    def get_persona_consistency_ranking(self):
+        """Return personas sorted by z-score (most to least consistent)."""
+        if not self.persona_consistency_results.get('individual_scores'):
+            return []
+        
+        scores_data = self.persona_consistency_results['individual_scores']
+        return sorted(scores_data.items(), key=lambda x: x[1]['z_score'], reverse=True)
+
+    def calculate_trait_behavioral_validation(self, full_df):
+        """Calculate trait-specific behavioral patterns for causal validation."""
+        from scipy.stats import chi2_contingency, ttest_ind
+        
+        # Define behavioral metrics for each trait
+        trait_behaviors = {
+            'extreme_bids': {},      # % of bids >70 or <30
+            'bid_variance': {},      # variance in bids
+            'rapid_changes': {},     # % of rounds with >20 point changes
+            'risk_taking': {}        # % of bids >60
+        }
+        
+        validation_results = {}
+        
+        # Calculate behaviors for each agent
+        for player in full_df['player'].unique():
+            trait = self.extract_persona_traits(player)
+            if not trait:
+                continue
+                
+            player_data = full_df[full_df['player'] == player].sort_values('round')
+            bids = player_data['bid'].values
+            
+            if len(bids) < 2:
+                continue
+                
+            # Calculate behavioral metrics
+            extreme_count = sum(1 for bid in bids if bid > 70 or bid < 30)
+            extreme_pct = (extreme_count / len(bids)) * 100
+            
+            bid_variance = np.var(bids)
+            
+            # Rapid changes (bid differences >20 between consecutive rounds)
+            if len(bids) > 1:
+                changes = [abs(bids[i] - bids[i-1]) for i in range(1, len(bids))]
+                rapid_changes = sum(1 for change in changes if change > 20)
+                rapid_pct = (rapid_changes / len(changes)) * 100
+            else:
+                rapid_pct = 0
+                
+            risk_count = sum(1 for bid in bids if bid > 60)
+            risk_pct = (risk_count / len(bids)) * 100
+            
+            # Store results
+            validation_results[player] = {
+                'trait': trait,
+                'extreme_bid_pct': extreme_pct,
+                'bid_variance': bid_variance,
+                'rapid_change_pct': rapid_pct,
+                'risk_taking_pct': risk_pct,
+                'total_rounds': len(bids)
+            }
+            
+            # Group by trait for comparison
+            if trait not in trait_behaviors['extreme_bids']:
+                trait_behaviors['extreme_bids'][trait] = []
+                trait_behaviors['bid_variance'][trait] = []
+                trait_behaviors['rapid_changes'][trait] = []
+                trait_behaviors['risk_taking'][trait] = []
+                
+            trait_behaviors['extreme_bids'][trait].append(extreme_pct)
+            trait_behaviors['bid_variance'][trait].append(bid_variance)
+            trait_behaviors['rapid_changes'][trait].append(rapid_pct)
+            trait_behaviors['risk_taking'][trait].append(risk_pct)
+        
+        # Calculate trait group averages and statistical tests
+        trait_comparisons = {}
+        
+        for behavior_name, trait_data in trait_behaviors.items():
+            trait_comparisons[behavior_name] = {}
+            
+            for trait, values in trait_data.items():
+                if values:  # Only if we have data
+                    trait_comparisons[behavior_name][trait] = {
+                        'mean': np.mean(values),
+                        'std': np.std(values),
+                        'count': len(values)
+                    }
+        
+        # Store results
+        self.trait_validation_results = {
+            'individual_results': validation_results,
+            'trait_comparisons': trait_comparisons
+        }
+        
+        # Add to summary stats
+        self.summary_stats["trait_validation_calculated"] = True
+        
+        logging.info(f"Calculated trait behavioral validation for {len(validation_results)} agents")
+
+    def get_trait_comparison_stats(self):
+        """Get specific statistics for paper reporting."""
+        if not hasattr(self, 'trait_validation_results'):
+            return None
+            
+        results = self.trait_validation_results
+        comparisons = results['trait_comparisons']
+        
+        stats = {}
+        
+        # Group traits by expected behavior patterns
+        impulsive_traits = ['impulsive', 'risk-tolerant', 'aggressive']
+        methodical_traits = ['methodical', 'rational', 'analytical']
+        
+        # Collect individual agent data for statistical tests
+        impulsive_data = {
+            'extreme_bids': [],
+            'bid_variance': [],
+            'rapid_changes': [],
+            'risk_taking': []
+        }
+        methodical_data = {
+            'extreme_bids': [],
+            'bid_variance': [],
+            'rapid_changes': [],
+            'risk_taking': []
+        }
+        
+        for player, data in results['individual_results'].items():
+            trait = data['trait']
+            if trait in impulsive_traits:
+                impulsive_data['extreme_bids'].append(data['extreme_bid_pct'])
+                impulsive_data['bid_variance'].append(data['bid_variance'])
+                impulsive_data['rapid_changes'].append(data['rapid_change_pct'])
+                impulsive_data['risk_taking'].append(data['risk_taking_pct'])
+            elif trait in methodical_traits:
+                methodical_data['extreme_bids'].append(data['extreme_bid_pct'])
+                methodical_data['bid_variance'].append(data['bid_variance'])
+                methodical_data['rapid_changes'].append(data['rapid_change_pct'])
+                methodical_data['risk_taking'].append(data['risk_taking_pct'])
+        
+        # Calculate statistics and t-tests
+        from scipy.stats import ttest_ind
+        
+        for behavior in ['extreme_bids', 'bid_variance', 'rapid_changes', 'risk_taking']:
+            imp_vals = impulsive_data[behavior]
+            meth_vals = methodical_data[behavior]
+            
+            if imp_vals and meth_vals:
+                stats[f'impulsive_{behavior}_mean'] = np.mean(imp_vals)
+                stats[f'impulsive_{behavior}_std'] = np.std(imp_vals)
+                stats[f'methodical_{behavior}_mean'] = np.mean(meth_vals)
+                stats[f'methodical_{behavior}_std'] = np.std(meth_vals)
+                stats[f'impulsive_{behavior}_count'] = len(imp_vals)
+                stats[f'methodical_{behavior}_count'] = len(meth_vals)
+                
+                # T-test for difference
+                try:
+                    t_stat, p_val = ttest_ind(imp_vals, meth_vals)
+                    stats[f'{behavior}_ttest_statistic'] = t_stat
+                    stats[f'{behavior}_ttest_p_value'] = p_val
+                    stats[f'{behavior}_significant'] = p_val < 0.05
+                except:
+                    stats[f'{behavior}_ttest_statistic'] = np.nan
+                    stats[f'{behavior}_ttest_p_value'] = np.nan
+                    stats[f'{behavior}_significant'] = False
+        
+        return stats
+
     def calculate_summary_stats(self, full_df):
         """Calculates aggregate statistics from the combined DataFrame."""
         if full_df is None or full_df.empty:
@@ -228,26 +539,37 @@ class G08AEvaluator:
         # --- Chi-squared test for win difference significance ---
         t1_wins = self.summary_stats["team1_wins"]
         t2_wins = self.summary_stats["team2_wins"]
-        observed = [[t1_wins, t2_wins]] # Needs to be 2D for chi2_contingency
+        total_decided_games = t1_wins + t2_wins  # Exclude ties for this test
 
         # Check if we have enough data for a meaningful test
-        if t1_wins + t2_wins >= 5 and t1_wins >= 0 and t2_wins >= 0: # Basic check for validity
+        if total_decided_games >= 10 and t1_wins >= 0 and t2_wins >= 0: # Need at least 10 total for meaningful test
             try:
-                chi2, p, _, expected = chi2_contingency(observed)
-                # Check expected frequencies (rule of thumb: all should be >= 5)
-                if np.all(expected >= 5):
-                    self.summary_stats["chi2_statistic"] = chi2
-                    self.summary_stats["p_value"] = p
-                    logging.info(f"Chi-squared test performed: chi2={chi2:.4f}, p={p:.4f}")
-                else:
-                    logging.warning(f"Chi-squared test expected frequencies low ({expected.flatten()}). Results may be inaccurate.")
-                    self.summary_stats["chi2_statistic"] = chi2 # Report anyway but warn
-                    self.summary_stats["p_value"] = p
-            except ValueError as e:
-                 logging.error(f"Chi-squared test failed: {e}. Observed data: {observed}")
+                # For goodness-of-fit test against equal probability (50/50)
+                expected_each = total_decided_games / 2.0
+                observed = [t1_wins, t2_wins]
+                expected = [expected_each, expected_each]
+                
+                # Calculate chi-squared manually for goodness-of-fit
+                chi2 = sum((obs - exp)**2 / exp for obs, exp in zip(observed, expected))
+                
+                # Degrees of freedom = number of categories - 1 - number of estimated parameters
+                # For 2 categories with fixed total, df = 1
+                df = 1
+                
+                # Calculate p-value using chi2 distribution
+                from scipy.stats import chi2 as chi2_dist
+                p = 1 - chi2_dist.cdf(chi2, df)
+                
+                self.summary_stats["chi2_statistic"] = chi2
+                self.summary_stats["p_value"] = p
+                logging.info(f"Chi-squared goodness-of-fit test performed: chi2={chi2:.4f}, p={p:.6f}")
+                logging.info(f"Observed: Team1={t1_wins}, Team2={t2_wins}, Expected: {expected_each:.1f} each")
+                
+            except Exception as e:
+                 logging.error(f"Chi-squared test failed: {e}. Observed data: T1={t1_wins}, T2={t2_wins}")
                  # Leave as NaN (default)
         else:
-            logging.warning(f"Skipping Chi-squared test due to insufficient data (T1 Wins: {t1_wins}, T2 Wins: {t2_wins}).")
+            logging.warning(f"Skipping Chi-squared test due to insufficient data (T1 Wins: {t1_wins}, T2 Wins: {t2_wins}, Total: {total_decided_games}).")
             # Leave as NaN (default)
 
         # --- Calculate Bid Distribution Stats (Mean, Std Dev, Normality) ---
@@ -283,6 +605,62 @@ class G08AEvaluator:
             self.summary_stats["team2_bid_std"] = np.nan
             self.summary_stats["team2_shapiro_p"] = np.nan
 
+        # ADD THIS AT THE END:
+        self.calculate_trait_behavioral_validation(full_df)
+
+    def generate_persona_consistency_plot(self):
+        """Generate visualization of persona consistency scores."""
+        if not self.persona_consistency_results.get('individual_scores'):
+            logging.warning("No persona consistency data to plot.")
+            return
+        
+        scores_data = self.persona_consistency_results['individual_scores']
+        
+        # Prepare data for plotting
+        plot_data = []
+        for player, data in scores_data.items():
+            plot_data.append({
+                'player': player,
+                'trait': data['trait'],
+                'score': data['score'],
+                'metric_value': data['value'],
+                'rounds': data['rounds']
+            })
+        
+        plot_df = pd.DataFrame(plot_data)
+        
+        if plot_df.empty:
+            return
+        
+        # Plot 1: Consistency scores by trait
+        plt.figure(figsize=(12, 8))
+        sns.boxplot(data=plot_df, x='trait', y='score', palette='viridis')
+        plt.title('Persona Consistency Scores by Trait Type', fontsize=16)
+        plt.xlabel('Personality Trait', fontsize=14)
+        plt.ylabel('Consistency Score', fontsize=14)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.output_dir, 'Persona_Consistency_by_Trait.pdf'), format='pdf')
+        plt.close()
+        
+        # Plot 2: Individual persona consistency scores
+        plt.figure(figsize=(max(10, len(plot_df) * 0.4), 7))
+        colors = [sns.color_palette('viridis', len(plot_df.trait.unique()))[i] 
+                 for i in range(len(plot_df))]
+        bars = plt.bar(range(len(plot_df)), plot_df['score'], color=colors)
+        plt.title('Individual Persona Consistency Scores', fontsize=16)
+        plt.xlabel('Personas', fontsize=14)
+        plt.ylabel('Consistency Score', fontsize=14)
+        plt.xticks(range(len(plot_df)), plot_df['player'], rotation=45, ha='right', fontsize=10)
+        
+        # Add trait labels on bars
+        for i, (bar, trait) in enumerate(zip(bars, plot_df['trait'])):
+            plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
+                    trait[:3], ha='center', va='bottom', fontsize=8)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.output_dir, 'Individual_Persona_Consistency.pdf'), format='pdf')
+        plt.close()
 
     def generate_plots(self, full_df):
         import matplotlib as mpl
@@ -475,6 +853,9 @@ class G08AEvaluator:
                 logging.warning(f"Could not generate Gaussian fit plot for {team_label} due to insufficient data (count: {len(bids)}).")
 
 
+        # Add persona consistency plot
+        self.generate_persona_consistency_plot()
+        
         logging.info(f"All aggregated plots saved to '{self.output_dir}'.")
 
 
@@ -550,6 +931,66 @@ Persona Performance (Avg. Deviation from Target):
         else:
             summary_text += "  N/A (Could not calculate persona performance)\n"
 
+        # --- Persona Consistency Analysis ---
+        if self.persona_consistency_results.get('individual_scores'):
+            ranking = self.get_persona_consistency_ranking()
+            
+            summary_text += f"""
+Persona Consistency Analysis (Z-Score Normalized):
+--------------------------------------------------
+Total Personas Analyzed: {len(ranking)}
+Mean Z-Score: {self.summary_stats.get('persona_z_score_mean', 0):.3f}
+Std Z-Score:  {self.summary_stats.get('persona_z_score_std', 0):.3f}
+
+Most Consistent Personas (Top 5):
+"""
+            for player, data in ranking[:5]:
+                summary_text += f"  - {player} ({data['trait']}): z={data['z_score']:.3f} ({data['metric']}={data['value']:.3f}, expects {data['direction']})\n"
+            
+            summary_text += "\nLeast Consistent Personas (Bottom 5):\n"
+            for player, data in ranking[-5:]:
+                summary_text += f"  - {player} ({data['trait']}): z={data['z_score']:.3f} ({data['metric']}={data['value']:.3f}, expects {data['direction']})\n"
+        else:
+            summary_text += "\nPersona Consistency Analysis: N/A (No traits identified)\n"
+
+        # ADD THIS NEW SECTION:
+        # --- Trait Behavioral Validation ---
+        if hasattr(self, 'trait_validation_results'):
+            comparison_stats = self.get_trait_comparison_stats()
+            if comparison_stats:
+                summary_text += f"""
+Trait Behavioral Validation (Causal Evidence):
+----------------------------------------------
+EXTREME BIDDING BEHAVIOR (>70 or <30):
+  - Impulsive agents: {comparison_stats.get('impulsive_extreme_bids_mean', 0):.1f}% ± {comparison_stats.get('impulsive_extreme_bids_std', 0):.1f}% (n={comparison_stats.get('impulsive_extreme_bids_count', 0)})
+  - Methodical agents: {comparison_stats.get('methodical_extreme_bids_mean', 0):.1f}% ± {comparison_stats.get('methodical_extreme_bids_std', 0):.1f}% (n={comparison_stats.get('methodical_extreme_bids_count', 0)})
+  - T-test: t={comparison_stats.get('extreme_bids_ttest_statistic', np.nan):.3f}, p={comparison_stats.get('extreme_bids_ttest_p_value', np.nan):.4f}
+  - Significant difference: {'YES' if comparison_stats.get('extreme_bids_significant', False) else 'NO'}
+
+BID VARIANCE (Volatility):
+  - Impulsive agents: {comparison_stats.get('impulsive_bid_variance_mean', 0):.1f} ± {comparison_stats.get('impulsive_bid_variance_std', 0):.1f}
+  - Methodical agents: {comparison_stats.get('methodical_bid_variance_mean', 0):.1f} ± {comparison_stats.get('methodical_bid_variance_std', 0):.1f}
+  - T-test: t={comparison_stats.get('bid_variance_ttest_statistic', np.nan):.3f}, p={comparison_stats.get('bid_variance_ttest_p_value', np.nan):.4f}
+  - Significant difference: {'YES' if comparison_stats.get('bid_variance_significant', False) else 'NO'}
+
+RAPID CHANGES (>20 point swings):
+  - Impulsive agents: {comparison_stats.get('impulsive_rapid_changes_mean', 0):.1f}% ± {comparison_stats.get('impulsive_rapid_changes_std', 0):.1f}%
+  - Methodical agents: {comparison_stats.get('methodical_rapid_changes_mean', 0):.1f}% ± {comparison_stats.get('methodical_rapid_changes_std', 0):.1f}%
+  - T-test: t={comparison_stats.get('rapid_changes_ttest_statistic', np.nan):.3f}, p={comparison_stats.get('rapid_changes_ttest_p_value', np.nan):.4f}
+  - Significant difference: {'YES' if comparison_stats.get('rapid_changes_significant', False) else 'NO'}
+
+RISK TAKING (>60 bids):
+  - Impulsive agents: {comparison_stats.get('impulsive_risk_taking_mean', 0):.1f}% ± {comparison_stats.get('impulsive_risk_taking_std', 0):.1f}%
+  - Methodical agents: {comparison_stats.get('methodical_risk_taking_mean', 0):.1f}% ± {comparison_stats.get('methodical_risk_taking_std', 0):.1f}%
+  - T-test: t={comparison_stats.get('risk_taking_ttest_statistic', np.nan):.3f}, p={comparison_stats.get('risk_taking_ttest_p_value', np.nan):.4f}
+  - Significant difference: {'YES' if comparison_stats.get('risk_taking_significant', False) else 'NO'}
+"""
+            else:
+                summary_text += "\nTrait Behavioral Validation: N/A (Insufficient data)\n"
+        else:
+            summary_text += "\nTrait Behavioral Validation: N/A (Not calculated)\n"
+
+        # --- Correlation Analysis ---
         summary_text += f"""
 Correlation Analysis (Pearson's r):
 -----------------------------------
@@ -562,6 +1003,7 @@ Team 2 Correlations:
 (Note: Correlations calculated on round-level aggregated data across experiments)
 =========================
 """
+        
         print(summary_text)
         summary_file_path = os.path.join(self.output_dir, "evaluation_summary.txt")
         try:
@@ -650,6 +1092,9 @@ Team 2 Correlations:
         if full_df is not None:
             # Calculate overall summary statistics
             self.calculate_summary_stats(full_df)
+            
+            # Calculate persona consistency after summary stats
+            self.calculate_persona_consistency(full_df)
 
             # Generate plots based on aggregated data
             self.generate_plots(full_df)
