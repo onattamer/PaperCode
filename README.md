@@ -6,6 +6,7 @@ This repository builds upon the open-source [ALYMPICS framework](https://github.
 
 > **Shaoguang Mao, Yuzhe Cai, Yan Xia, Wenshan Wu, Xun Wang, Fengyi Wang, Qiang Guan, Tao Ge, and Furu Wei.**  
 > *ALYMPICS: LLM Agents Meet Game Theory.*  
+> arXiv preprint arXiv:2311.03220, 2023. [https://arxiv.org/abs/2311.03220](https://arxiv.org/abs/2311.03220)
 
 We thank the authors for sharing their platform.  
 While our framework reuses some structural elements (e.g., `SandboxPlayground`, `AgentPlayer`), we have extensively modified and expanded the system to support:
