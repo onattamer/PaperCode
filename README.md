@@ -2,7 +2,7 @@
 
 ## 🙏 Acknowledgment & Code Attribution
 
-This repository builds upon the open-source [ALYMPICS framework](https://github.com/microsoft/Alympics/tree/main) introduced in:
+This repository builds upon the open-source [ALYMPICS framework](https://github.com/microsoft/Alympics) introduced in:
 
 > **Shaoguang Mao, Yuzhe Cai, Yan Xia, Wenshan Wu, Xun Wang, Fengyi Wang, Qiang Guan, Tao Ge, and Furu Wei.**  
 > *ALYMPICS: LLM Agents Meet Game Theory.*  
@@ -30,6 +30,7 @@ While our framework reuses some structural elements (e.g., `SandboxPlayground`, 
   year={2025}
 }
 ```
+
 
 ## 🎯 Overview
 
@@ -106,3 +107,12 @@ Each experiment generates:
 For questions or collaborations:
 - **Tamer Onat**: [onattamer55@gmail.com](mailto:onattamer55@gmail.com)
 - **Abdurrahman Gümüş**: [abdurrahmangumus@iyte.edu.tr](mailto:abdurrahmangumus@iyte.edu.tr)
+
+
+## 📄 License
+
+This repository is released under the MIT License.
+
+Portions of the codebase are adapted from the ALYMPICS project by Microsoft:
+https://github.com/microsoft/Alympics  
+See `third_party/ALYMPICS/LICENSE` for details.
